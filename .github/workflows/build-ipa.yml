@@ -1,0 +1,105 @@
+name: Build MultiZalo IPA (iOS)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle Identifier tùy chỉnh (tùy chọn)"
+        required: false
+        default: "com.multizalo.ios"
+        type: string
+
+jobs:
+  build-ipa:
+    name: Build Unsigned iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Apply custom Bundle Identifier (if provided)
+        env:
+          CUSTOM_BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          if [ -n "$CUSTOM_BUNDLE_ID" ] && [ "$CUSTOM_BUNDLE_ID" != "com.multizalo.ios" ]; then
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          custom_id = os.environ["CUSTOM_BUNDLE_ID"].strip()
+          if not custom_id:
+              raise SystemExit(0)
+
+          spec_path = Path("project.yml")
+          content = spec_path.read_text(encoding="utf-8")
+          target = "PRODUCT_BUNDLE_IDENTIFIER: com.multizalo.ios"
+          if target not in content:
+              raise SystemExit("Expected PRODUCT_BUNDLE_IDENTIFIER entry not found in project.yml")
+
+          spec_path.write_text(
+              content.replace(target, f"PRODUCT_BUNDLE_IDENTIFIER: {custom_id}", 1),
+              encoding="utf-8",
+          )
+          print(f"Updated PRODUCT_BUNDLE_IDENTIFIER to {custom_id}")
+          PY
+          fi
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned Release app
+        run: |
+          xcodebuild build \
+            -project MultiZalo.xcodeproj \
+            -scheme MultiZalo \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$(pwd)/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$(pwd)/DerivedData/Build/Products/Release-iphoneos/MultiZalo.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH=$(find "$(pwd)/DerivedData" -name "MultiZalo.app" -type d | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Error: MultiZalo.app not found inside DerivedData"
+            exit 1
+          fi
+
+          echo "Found app bundle: $APP_PATH"
+          rm -rf Payload MultiZalo-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          rm -rf Payload/MultiZalo.app/_CodeSignature
+
+          zip -r -9 MultiZalo-unsigned.ipa Payload
+          rm -rf Payload
+
+          unzip -l MultiZalo-unsigned.ipa | head -n 30
+          ls -lh MultiZalo-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiZalo-iOS-IPA
+          path: MultiZalo-unsigned.ipa
+          retention-days: 90
